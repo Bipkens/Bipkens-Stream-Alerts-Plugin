@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<title>Alert nagrody</title>
+<style>
+  /* ====== USTAWIENIA WYGLĄDU ====== */
+  :root {
+    --szerokosc: 800px;
+    --wysokosc: 250px;
+    --czcionka: "Segoe UI", Arial, sans-serif;
+    --kolor-tekstu: #ffffff;
+    --kolor-nicku: #ffde59;
+    --kolor-nagrody: #a0fcff;
+    --rozmiar-tekstu: 38px;       /* wielkość napisu */
+    --przesuniecie-tekstu: 170px; /* im więcej, tym bardziej tekst w prawo */
+  }
+
+  html, body {
+    margin: 0;
+    width: var(--szerokosc);
+    height: var(--wysokosc);
+    background: transparent;
+    overflow: hidden;
+    font-family: var(--czcionka);
+  }
+
+  #alert {
+    position: absolute;
+    left: 0;
+    bottom: 0;
+    width: 100%;
+    height: 100%;
+
+    background-position: center;
+    background-size: 100% 100%;
+    background-repeat: no-repeat;
+
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 0 40px 0 var(--przesuniecie-tekstu);
+    box-sizing: border-box;
+
+    transform: translateY(100%);   /* ukryty poniżej dolnej krawędzi (ucięty) */
+    will-change: transform; /* animacja na karcie graficznej */
+  }
+
+  #alert.wjazd { animation: wjazd 0.8s cubic-bezier(0.22, 1, 0.36, 1) forwards; }
+  #alert.zjazd { animation: zjazd 0.6s ease-in forwards; }
+
+  @keyframes wjazd {
+    from { transform: translateY(100%); }
+    to   { transform: translateY(0); }
+  }
+  @keyframes zjazd {
+    from { transform: translateY(0); }
+    to   { transform: translateY(100%); }
+  }
+
+  #tekst {
+    color: var(--kolor-tekstu);
+    font-size: var(--rozmiar-tekstu);
+    font-weight: 700;
+    line-height: 1.2;
+    text-shadow: 0 2px 4px rgba(0, 0, 0, 0.6);
+  }
+  #nick { color: var(--kolor-nicku); }
+  #linia1 { white-space: nowrap; }
+  #nagroda { color: var(--kolor-nagrody); }
+  #debug {
+    position: fixed; top: 10px; left: 10px;
+    background: rgba(0,0,0,0.75); color: #0f0;
+    font: 16px/1.4 Consolas, monospace;
+    padding: 8px 12px; border-radius: 6px; white-space: pre;
+    display: none; z-index: 99;
+  }
+</style>
+</head>
+<body>
+
+<div id="debug"></div>
+
+<div id="alert">
+  <div id="tekst">
+    <div id="linia1"><span id="nick"></span> <span id="akcja">wykupił</span></div>
+    <div id="nagroda"></div>
+  </div>
+</div>
+
+<script>
+  // ====== USTAWIENIA DZIAŁANIA ======
+  const ADRES_WS       = "ws://127.0.0.1:8080/";
+  const TRYB_USTAWIANIA = false; // true = alert wyświetla się cały czas (do ustawiania pozycji, tekstu i grafiki)
+  const CZAS_POKAZANIA = 5000; // ile ms alert jest widoczny (po wjeździe)
+
+  // Folder z grafikami (zapasowa ścieżka, gdyby obrazka nie było obok pliku HTML)
+  const FOLDER_GRAFIK = "file:///C:/Users/troni/OneDrive/Pulpit/Twitch%20Plugins/AlertyGrafiki/";
+
+  // Obsługiwane nagrody. "kolor" = kolor nazwy nagrody. "szukaj" = fragment nazwy nagrody z Twitcha (wielkość liter nie ma znaczenia).
+  const NAGRODY = [
+    { szukaj: "nawadnian", obraz: "AlertNawadnianie.png", kolor: "#a0fcff" },
+    { szukaj: "fikołek",   obraz: "AlertFikolek.png",    kolor: "#ffa0e7" }
+  ];
+
+  // Panel diagnostyczny w lewym górnym rogu. Po sprawdzeniu zmień na false.
+  const DEBUG = false;
+  const dbgEl = document.getElementById("debug");
+  const dbg = { ws: "łączenie...", zdarzenie: "-", obraz: "-" };
+  function pokazDebug() {
+    if (!DEBUG) return;
+    dbgEl.style.display = "block";
+    dbgEl.textContent = "Streamer.bot: " + dbg.ws + "\nOstatnie zdarzenie: " + dbg.zdarzenie + "\nObraz: " + dbg.obraz;
+  }
+  pokazDebug();
+
+  const alertEl   = document.getElementById("alert");
+  const nickEl    = document.getElementById("nick");
+  const nagrodaEl = document.getElementById("nagroda");
+
+  const kolejka = [];
+  let trwa = false;
+
+  // Wczytuje obraz: najpierw z folderu obok pliku HTML, potem z pełnej ścieżki
+  const pamiec = {};   // zapamiętane adresy obrazków (wczytujemy każdy tylko raz)
+  function wczytajObraz(plik) {
+    if (pamiec[plik]) return Promise.resolve(pamiec[plik]);
+    const proby = [encodeURI(plik), FOLDER_GRAFIK + encodeURI(plik)];
+    return new Promise((resolve) => {
+      const probuj = (i) => {
+        if (i >= proby.length) { console.warn("Nie udało się wczytać obrazka:", plik); dbg.obraz = "BŁĄD: nie wczytano " + plik; pokazDebug(); resolve(null); return; }
+        const img = new Image();
+        img.onload = () => { pamiec[plik] = proby[i]; dbg.obraz = "OK: " + proby[i]; pokazDebug(); resolve(proby[i]); };
+        img.onerror = () => probuj(i + 1);
+        img.src = proby[i];
+      };
+      probuj(0);
+    });
+  }
+
+  function dodajDoKolejki(nick, nagroda, obraz, kolor) {
+    if (TRYB_USTAWIANIA) { pokazStale(nick, nagroda, obraz, kolor); return; }
+    kolejka.push({ nick, nagroda, obraz, kolor });
+    if (!trwa) nastepny();
+  }
+
+  async function nastepny() {
+    const el = kolejka.shift();
+    if (!el) { trwa = false; return; }
+    trwa = true;
+
+    const url = await wczytajObraz(el.obraz);
+    alertEl.style.backgroundImage = url ? 'url("' + url + '")' : "none";
+    nickEl.textContent = el.nick;
+    nagrodaEl.textContent = el.nagroda;
+    nagrodaEl.style.color = el.kolor;
+
+    alertEl.classList.remove("zjazd");
+    void alertEl.offsetWidth;
+    alertEl.classList.add("wjazd");
+
+    setTimeout(() => {
+      alertEl.classList.remove("wjazd");
+      alertEl.classList.add("zjazd");
+      setTimeout(nastepny, 700);
+    }, 800 + CZAS_POKAZANIA);
+  }
+
+  // Tryb ustawiania: alert wisi na ekranie bez animacji i bez znikania
+  async function pokazStale(nick, nagroda, obraz, kolor) {
+    const url = await wczytajObraz(obraz);
+    alertEl.style.backgroundImage = url ? 'url("' + url + '")' : "none";
+    nickEl.textContent = nick;
+    nagrodaEl.textContent = nagroda;
+    nagrodaEl.style.color = kolor;
+    alertEl.classList.remove("wjazd", "zjazd");
+    alertEl.style.transform = "none";
+    alertEl.style.opacity = "1";
+  }
+  if (TRYB_USTAWIANIA) {
+    pokazStale("TestowyWidz", "Przerwa na nawadnianie", NAGRODY[0].obraz, NAGRODY[0].kolor);
+  }
+
+  // Wczytaj obrazki od razu przy starcie, żeby alert nie zacinał się przy pierwszym wykupie
+  NAGRODY.forEach(n => wczytajObraz(n.obraz));
+
+  // ====== POŁĄCZENIE ZE STREAMER.BOT ======
+  function polacz() {
+    const ws = new WebSocket(ADRES_WS);
+
+    ws.onopen = () => {
+      console.log("Połączono ze Streamer.bot"); dbg.ws = "POŁĄCZONO"; pokazDebug();
+      ws.send(JSON.stringify({
+        request: "Subscribe",
+        id: "alert-nagrody",
+        events: { Twitch: ["RewardRedemption"] }
+      }));
+    };
+
+    ws.onmessage = (msg) => {
+      let dane;
+      try { dane = JSON.parse(msg.data); } catch (e) { return; }
+      if (!dane.event || dane.event.type !== "RewardRedemption") return;
+
+      console.log("Zdarzenie:", dane); dbg.zdarzenie = JSON.stringify(dane.data || {}).slice(0, 160); pokazDebug();
+      const d = dane.data || {};
+      const nick = d.user_name || d.userName || d.user || d.displayName || "Ktoś";
+      const nagroda = (d.reward && d.reward.title) || d.rewardTitle || d.title || "";
+
+      const pasuje = NAGRODY.find(n => nagroda.toLowerCase().includes(n.szukaj));
+      if (!pasuje) return;   // inne nagrody ignorujemy
+      dodajDoKolejki(nick, nagroda, pasuje.obraz, pasuje.kolor);
+    };
+
+    ws.onclose = () => { dbg.ws = "BRAK POŁĄCZENIA (ponawiam)"; pokazDebug(); setTimeout(polacz, 3000); };
+    ws.onerror = () => ws.close();
+  }
+  polacz();
+
+  // Test w przeglądarce: T = przerwa na nawadnianie, F = fikołek
+  document.addEventListener("keydown", (e) => {
+    const k = e.key.toLowerCase();
+    if (k === "t") dodajDoKolejki("TestowyWidz", "Przerwa na nawadnianie", NAGRODY[0].obraz, NAGRODY[0].kolor);
+    if (k === "f") dodajDoKolejki("TestowyWidz", "Fikołek", NAGRODY[1].obraz, NAGRODY[1].kolor);
+  });
+</script>
+</body>
+</html>
